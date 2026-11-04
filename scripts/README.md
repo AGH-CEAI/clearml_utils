@@ -42,6 +42,8 @@ where `SUMMARY` is the result of the `clearml_summarizer.py` run in the `YOUR_PR
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net128_temper_actor --tags net128 hyperopt
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net256_temper_actor --tags net256 hyperopt
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net512_temper_actor --tags net512 hyperopt
+# ...or summarize every sub-project at once (skipping the already summarized ones)
+./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim --subprojects --skip-summarized --tags hyperopt
 
 # 3. Aggregate experiment summaries
 ./clearml_exp_plotter.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim -h

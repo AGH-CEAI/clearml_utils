@@ -5,6 +5,8 @@
 
 import colorsys
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,6 +15,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import plotly.graph_objects as go
 from clearml import Logger, Task, TaskTypes
+from clearml.backend_api import Session
+from clearml.backend_api.services import events as events_service
+from clearml.backend_api.session.defs import ENV_ACCESS_KEY, ENV_SECRET_KEY
+from clearml.backend_interface.metrics.events import ScalarEvent
+from clearml.config import config_obj
 from helpers.data_getter import N_JOBS, DataGetter, SummaryType
 from joblib import Parallel, delayed
 
@@ -54,6 +61,8 @@ class StatisticsSeries:
 FIELD_MAP = {"mean": "mean", "std": "std", "min": "minimum", "max": "maximum"}
 DEFAULT_SUMMARY_TASK_NAME = "SUMMARY"
 DEFAULT_SUMMARY_TAG_NAME = DEFAULT_SUMMARY_TASK_NAME.lower()
+SCALARS_BATCH_SIZE = 5_000
+SCALARS_SEND_THREADS = 8
 
 
 class Summarizer:
@@ -200,6 +209,10 @@ class Summarizer:
 
     def _process_summarized_metrics(self) -> dict[str, StatisticsSeries]:
         """Aggregate raw series from all tasks into mean/std/min/max."""
+        n_series_per_title: dict[str, int] = {}
+        for path_str in self.metric_paths:
+            top_key = "/".join(path_str.split("/")[:-2])
+            n_series_per_title[top_key] = n_series_per_title.get(top_key, 0) + 1
 
         def _process_one_summarized(
             path_str: str,
@@ -216,6 +229,11 @@ class Summarizer:
                 self.log.warning(f"Skipping '{path_str}': extraction failed.")
                 return top_key, None, None
 
+            # Several series in one graph (e.g. `Episode/{a,b}`) - summarize each separately
+            metric_name = top_key
+            if n_series_per_title[top_key] > 1:
+                metric_name = f"{top_key}/{variable}"
+
             n_samples = min(len(d) for d in data_series)
             if any(len(d) != n_samples for d in data_series):
                 self.log.warning(
@@ -225,7 +243,7 @@ class Summarizer:
                 data_series = [d[:n_samples] for d in data_series]
 
             return (
-                top_key,
+                metric_name,
                 self._get_x_axis(top_key, variable, n_samples),
                 StatisticsData(
                     series_name=f"tasks_n{len(self.tasks)}",
@@ -245,13 +263,14 @@ class Summarizer:
 
         # Reassemble in order — joblib preserves order, but we need to merge by top_key
         metrics_stats: dict[str, StatisticsSeries] = {}
-        for top_key, x_axis, data in results:
+        for metric_name, x_axis, data in results:
             if data is None:
                 continue
-            metrics_stats.setdefault(
-                top_key, StatisticsSeries(name=top_key, series=[None], x_axis=x_axis)
+            if metric_name in metrics_stats:
+                self.log.warning(f"Duplicated metric '{metric_name}', overwriting it.")
+            metrics_stats[metric_name] = StatisticsSeries(
+                name=metric_name, series=[data], x_axis=x_axis
             )
-            metrics_stats[top_key].series[0] = data
 
         self.log.info("Finished extraction of statistical summaries.")
         return metrics_stats
@@ -326,19 +345,41 @@ class Summarizer:
 
         summary_logger = summary_task.get_logger()
 
-        def _summarize_one_metric(metric: StatisticsSeries) -> None:
-            self._report_scalars(summary_logger, metric)
-            self._report_filled_plots(summary_logger, metric)
-
         with Parallel(n_jobs=self.n_jobs, backend="threading") as parallel:
+            scalar_events = parallel(
+                delayed(self._build_scalar_events)(summary_task.task_id, metric)
+                for metric in self.metrics_stats.values()
+            )
             parallel(
-                delayed(_summarize_one_metric)(metric)
+                delayed(self._report_filled_plots)(summary_logger, metric)
                 for metric in self.metrics_stats.values()
             )
 
-    def _report_scalars(self, t_log: Logger, metric: StatisticsSeries) -> None:
-        self.log.info(f"[METRIC] {metric.name} | Reporting scalars to ClearML server.")
+        self._send_scalar_events(
+            summary_task, [ev for events in scalar_events for ev in events]
+        )
+
+    def _build_scalar_events(
+        self, task_id: str, metric: StatisticsSeries
+    ) -> list[events_service.AddRequest]:
+        self.log.info(f"[METRIC] {metric.name} | Preparing scalars.")
         title = metric.name
+        timestamp = int(time.time() * 1000)
+        events: list[events_service.AddRequest] = []
+
+        def _add(metric_title: str, variant: str, value: float, x: int) -> None:
+            events.append(
+                events_service.AddRequest(
+                    event=events_service.MetricsScalarEvent(
+                        task=task_id,
+                        timestamp=timestamp,
+                        metric=metric_title,
+                        variant=variant,
+                        iter=int(x),
+                        value=ScalarEvent._convert_np_nan_inf(float(value)),
+                    )
+                )
+            )
 
         for step, x in enumerate(metric.x_axis):
             for series in metric.series:
@@ -352,31 +393,81 @@ class Summarizer:
                 prefix = "" if len(metric.series) == 1 else f"{series_name}_"
 
                 if SummaryType.MEAN in self.summary_types:
-                    t_log.report_scalar(f"{title}_mean", mean_name, mean[step], x)
+                    _add(f"{title}_mean", mean_name, mean[step], x)
 
                 if SummaryType.MEAN_MINMAX in self.summary_types:
-                    t_log.report_scalar(
-                        f"{title}_mean-min-max", f"{prefix}mean", mean[step], x
-                    )
-                    t_log.report_scalar(
-                        f"{title}_mean-min-max", f"{prefix}min", minimum[step], x
-                    )
-                    t_log.report_scalar(
-                        f"{title}_mean-min-max", f"{prefix}max", maximum[step], x
-                    )
+                    _add(f"{title}_mean-min-max", f"{prefix}mean", mean[step], x)
+                    _add(f"{title}_mean-min-max", f"{prefix}min", minimum[step], x)
+                    _add(f"{title}_mean-min-max", f"{prefix}max", maximum[step], x)
 
                 if SummaryType.MEAN_STD in self.summary_types:
-                    t_log.report_scalar(
-                        f"{title}_mean-std", f"{prefix}mean", mean[step], x
+                    _add(f"{title}_mean-std", f"{prefix}mean", mean[step], x)
+                    _add(
+                        f"{title}_mean-std",
+                        f"{prefix}std+",
+                        mean[step] + std[step],
+                        x,
                     )
-                    t_log.report_scalar(
-                        f"{title}_mean-std", f"{prefix}std+", mean[step] + std[step], x
-                    )
-                    t_log.report_scalar(
-                        f"{title}_mean-std", f"{prefix}std-", mean[step] - std[step], x
+                    _add(
+                        f"{title}_mean-std",
+                        f"{prefix}std-",
+                        mean[step] - std[step],
+                        x,
                     )
 
-        self.log.info(f"[METRIC] {metric.name} | Finished reporting scalars.")
+        return events
+
+    def _send_scalar_events(
+        self, summary_task: Task, events: list[events_service.AddRequest]
+    ) -> None:
+        """Send scalars in large batches, bypassing the Logger (which flushes every ~100 events)."""
+        batches = [
+            events[i : i + SCALARS_BATCH_SIZE]
+            for i in range(0, len(events), SCALARS_BATCH_SIZE)
+        ]
+        self.log.info(
+            f"Reporting {len(events)} scalar values to ClearML server in {len(batches)} batch(es)."
+        )
+
+        # The ClearML session (HTTP connection) is not thread-safe, so use one per thread
+        thread_local = threading.local()
+        sent_lock = threading.Lock()
+        sent = 0
+
+        def _send_one(idx: int, batch: list[events_service.AddRequest]) -> int:
+            nonlocal sent
+            if not hasattr(thread_local, "session"):
+                thread_local.session = Session(
+                    initialize_logging=False,
+                    config=config_obj,
+                    api_key=ENV_ACCESS_KEY.get(),
+                    secret_key=ENV_SECRET_KEY.get(),
+                )
+            res = thread_local.session.send(
+                events_service.AddBatchRequest(requests=batch)
+            )
+            if res is None or not res.ok():
+                meta = res.meta if res is not None else None
+                raise RuntimeError(
+                    f"Failed to report scalars (batch {idx}/{len(batches)}): {meta}"
+                )
+            with sent_lock:
+                sent += 1
+                if sent % 10 == 0:
+                    self.log.info(f"Sent {sent}/{len(batches)} scalar batches.")
+            return getattr(res.response, "errors", 0) or 0
+
+        with Parallel(n_jobs=SCALARS_SEND_THREADS, backend="threading") as parallel:
+            errors = sum(
+                parallel(
+                    delayed(_send_one)(idx, batch)
+                    for idx, batch in enumerate(batches, start=1)
+                )
+            )
+
+        if errors:
+            self.log.warning(f"ClearML server rejected {errors} scalar value(s).")
+        self.log.info("Finished reporting scalars.")
 
     def _report_filled_plots(self, t_log: Logger, metric: StatisticsSeries) -> None:
         self.log.info(
