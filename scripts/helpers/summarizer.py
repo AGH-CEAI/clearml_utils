@@ -22,6 +22,7 @@ from clearml.backend_interface.metrics.events import ScalarEvent
 from clearml.config import config_obj
 from helpers.data_getter import N_JOBS, DataGetter, SummaryType
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 
 def _add_task_tags(t_id: str, tags: list[str]) -> None:
@@ -431,11 +432,10 @@ class Summarizer:
 
         # The ClearML session (HTTP connection) is not thread-safe, so use one per thread
         thread_local = threading.local()
-        sent_lock = threading.Lock()
-        sent = 0
+        progress_lock = threading.Lock()
+        progress = tqdm(total=len(events), desc="Uploading scalars", unit="pts")
 
         def _send_one(idx: int, batch: list[events_service.AddRequest]) -> int:
-            nonlocal sent
             if not hasattr(thread_local, "session"):
                 thread_local.session = Session(
                     initialize_logging=False,
@@ -451,13 +451,14 @@ class Summarizer:
                 raise RuntimeError(
                     f"Failed to report scalars (batch {idx}/{len(batches)}): {meta}"
                 )
-            with sent_lock:
-                sent += 1
-                if sent % 10 == 0:
-                    self.log.info(f"Sent {sent}/{len(batches)} scalar batches.")
+            with progress_lock:
+                progress.update(len(batch))
             return getattr(res.response, "errors", 0) or 0
 
-        with Parallel(n_jobs=SCALARS_SEND_THREADS, backend="threading") as parallel:
+        with (
+            progress,
+            Parallel(n_jobs=SCALARS_SEND_THREADS, backend="threading") as parallel,
+        ):
             errors = sum(
                 parallel(
                     delayed(_send_one)(idx, batch)

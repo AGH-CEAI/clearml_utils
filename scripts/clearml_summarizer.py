@@ -12,6 +12,7 @@
 #   "matplotlib",
 #   "numpy",
 #   "plotly",
+#   "tqdm",
 # ]
 # ///
 import argparse
