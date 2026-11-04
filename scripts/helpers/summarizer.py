@@ -48,6 +48,7 @@ class StatisticsData:
 class StatisticsSeries:
     name: str
     series: list[StatisticsData]
+    x_axis: list[float]
 
 
 FIELD_MAP = {"mean": "mean", "std": "std", "min": "minimum", "max": "maximum"}
@@ -82,7 +83,6 @@ class Summarizer:
 
         self.tasks = tasks_data.tasks
         self.metric_paths = tasks_data.metrics_paths
-        self.x_axis = self._get_x_axis()
         self.metrics_stats = self._process_metrics_statistics()
 
         self.project_name = tasks_data.project_name
@@ -102,38 +102,25 @@ class Summarizer:
         self.log.info(f"Summary type(s): {[str(x) for x in self.summary_types]}")
         self.log.info(f"Using `{self.plots_backend}` for plots backend.")
 
-    def _get_x_axis(self) -> list[float] | None:
-        self.log.info("Obtaining X axis")
-
+    def _get_x_axis(self, top_key: str, series_name: str, length: int) -> list[float]:
+        """X axis of a given metric series (taken from the first task reporting it)."""
         x_axis = next(
             (
-                series["x"]
+                t_data[top_key][series_name]["x"]
                 for t_data in self.tasks.values()
-                for metrics in t_data.values()
-                for series in metrics.values()
-                if "x" in series
+                if "x" in t_data.get(top_key, {}).get(series_name, {})
             ),
             None,
         )
 
-        if x_axis is not None:
-            self.log.info(f"Got the X axis definition with {len(x_axis)} steps.")
-            return x_axis
+        if x_axis is not None and len(x_axis) >= length:
+            return list(x_axis[:length])
 
         self.log.warning(
-            "Failed to get the X axis, the length of series will be used instead."
+            f"Failed to get the X axis for '{top_key}/{series_name}', "
+            "the length of series will be used instead."
         )
-        y_axis = next(
-            (
-                series["y"]
-                for t_data in self.tasks.values()
-                for metrics in t_data.values()
-                for series in metrics.values()
-                if "y" in series
-            ),
-            None,
-        )
-        return [x for x in range(len(y_axis))]
+        return list(range(length))
 
     def _process_metrics_statistics(self) -> dict[str, StatisticsSeries]:
         if self.enable_summary_processing:
@@ -162,7 +149,14 @@ class Summarizer:
             top_key: str, stats: set[str], tasks_cache: dict[str, Task]
         ) -> tuple[str, StatisticsSeries]:
             n_tasks = len(self.tasks)
-            result = StatisticsSeries(name=top_key, series=[None] * n_tasks)
+            first_stat = next(iter(stats))
+            first_task_data = next(iter(self.tasks.values()))
+            x_axis = self._get_x_axis(
+                top_key, first_stat, len(first_task_data[top_key][first_stat]["y"])
+            )
+            result = StatisticsSeries(
+                name=top_key, series=[None] * n_tasks, x_axis=x_axis
+            )
             unique_series_names: set[str] = set()
 
             for idx, (t_id, t_data) in enumerate(self.tasks.items()):
@@ -207,7 +201,9 @@ class Summarizer:
     def _process_summarized_metrics(self) -> dict[str, StatisticsSeries]:
         """Aggregate raw series from all tasks into mean/std/min/max."""
 
-        def _process_one_summarized(path_str: str) -> tuple[str, str, StatisticsData]:
+        def _process_one_summarized(
+            path_str: str,
+        ) -> tuple[str, list[float] | None, StatisticsData | None]:
             parts = path_str.split("/")
             top_key = "/".join(parts[:-2])
             variable = parts[-2]  # e.g. "y"
@@ -218,11 +214,19 @@ class Summarizer:
             ]
             if not data_series:
                 self.log.warning(f"Skipping '{path_str}': extraction failed.")
-                return top_key, stat, None
+                return top_key, None, None
+
+            n_samples = min(len(d) for d in data_series)
+            if any(len(d) != n_samples for d in data_series):
+                self.log.warning(
+                    f"'{path_str}': tasks have different numbers of samples, "
+                    f"truncating to the shortest one ({n_samples})."
+                )
+                data_series = [d[:n_samples] for d in data_series]
 
             return (
                 top_key,
-                stat,
+                self._get_x_axis(top_key, variable, n_samples),
                 StatisticsData(
                     series_name=f"tasks_n{len(self.tasks)}",
                     data_num=len(self.tasks),
@@ -241,11 +245,11 @@ class Summarizer:
 
         # Reassemble in order — joblib preserves order, but we need to merge by top_key
         metrics_stats: dict[str, StatisticsSeries] = {}
-        for top_key, _stat, data in results:
+        for top_key, x_axis, data in results:
             if data is None:
                 continue
             metrics_stats.setdefault(
-                top_key, StatisticsSeries(name=top_key, series=[None])
+                top_key, StatisticsSeries(name=top_key, series=[None], x_axis=x_axis)
             )
             metrics_stats[top_key].series[0] = data
 
@@ -336,8 +340,7 @@ class Summarizer:
         self.log.info(f"[METRIC] {metric.name} | Reporting scalars to ClearML server.")
         title = metric.name
 
-        for step in range(len(self.x_axis)):
-            x = self.x_axis[step]
+        for step, x in enumerate(metric.x_axis):
             for series in metric.series:
                 series_name = series.series_name
                 mean = series.mean
@@ -408,7 +411,7 @@ class Summarizer:
             band_alpha=self.plot_alpha_fill,
         )
 
-        x = np.asarray(self.x_axis)
+        x = np.asarray(metric.x_axis)
         metric_name = metric.name
 
         # One figure per summary type, all series added before reporting
@@ -523,7 +526,7 @@ class Summarizer:
         t_log: Logger,
         metric: StatisticsSeries,
     ) -> None:
-        x = np.asarray(self.x_axis)
+        x = np.asarray(metric.x_axis)
         metric_name = metric.name
 
         # Create one figure per summary type upfront
