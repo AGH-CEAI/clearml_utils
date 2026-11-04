@@ -1,6 +1,6 @@
 repos:
 -   repo: https://gitlab.com/vojko.pribudic.foss/pre-commit-update
-    rev: v0.9.0
+    rev: v0.10.0
     hooks:
     -   id: pre-commit-update
 
@@ -35,7 +35,7 @@ repos:
         args: ["--autofix", "--no-sort-keys", "--indent", "2"]
 
 -   repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.32
+    rev: 0.13.7
     hooks:
     -   id: uv-lock
 
@@ -46,7 +46,7 @@ repos:
         args: [--write-changes]
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.17.3
     hooks:
     -   id: ruff-check
         args:
