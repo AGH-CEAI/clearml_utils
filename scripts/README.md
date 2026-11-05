@@ -42,6 +42,8 @@ where `SUMMARY` is the result of the `clearml_summarizer.py` run in the `YOUR_PR
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net128_temper_actor --tags net128 hyperopt
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net256_temper_actor --tags net256 hyperopt
 ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim/net512_temper_actor --tags net512 hyperopt
+# ...or summarize every sub-project at once (skipping the already summarized ones)
+./clearml_summarizer.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim --subprojects --skip-summarized --tags hyperopt
 
 # 3. Aggregate experiment summaries
 ./clearml_exp_plotter.py --cleanup-previous-tags --project-name PROJ_EXP1/architecture_rl-sim -h
@@ -104,9 +106,9 @@ ros2 launch aegis_description generate_standalone_urdf.launch.py disable_cell:=t
 ```
 Which will generate the whole URDF file with 3D models in a default `~/ceai_ws/aegis_urdf` directory.
 
-2. Run the [`utils/upload_urdf_to_clearml.py`](./utils/upload_urdf_to_clearml.py) script with the following options:
+2. Run the [`upload_urdf_to_clearml.py`](./upload_urdf_to_clearml.py) script with the following options:
 ```bash
-python3 utils/upload_urdf_to_clearml.py ~/ceai_ws/aegis_urdf --name AegisURDFModel --project AEGIS_GRASP --desc "Aegis simulator assets"
+python3 ./upload_urdf_to_clearml.py ~/ceai_ws/aegis_urdf --name AegisURDFModel --project AEGIS_GRASP --desc "Aegis simulator assets"
 ```
 > [!WARNING]
 > **To update the dataset** make sure to add an additional option: `--parent "PREVIOUS_DATASET_ID"`

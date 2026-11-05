@@ -90,7 +90,11 @@ def build_parser(
         type=int,
         default=1_000,
         dest="max_samples",
-        help="Maximum scalar samples fetched per task (default: 1000).",
+        help=(
+            "Maximum scalar samples (points) fetched per series (default: 1000). "
+            "If lower than the number of reported iterations, the ClearML server downsamples "
+            "the data, e.g. use 5000 to get all of the iterations 0..4999."
+        ),
     )
     p.add_argument(
         "--plots-backend",

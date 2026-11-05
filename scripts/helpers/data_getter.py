@@ -5,6 +5,7 @@
 
 import functools
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -42,6 +43,32 @@ class TaskLoadResult:
 
 
 N_JOBS = -1  # use all available cores/threads
+
+
+def get_subproject_names(root_project: str) -> list[str]:
+    """Return names of the direct sub-projects of `root_project` (sorted)."""
+    session = Task._get_default_session()
+    res = session.send(
+        projects_service.GetAllRequest(
+            name=f"^{re.escape(root_project)}/[^/]+$",
+            only_fields=["name"],
+            search_hidden=False,
+        )
+    )
+    if not res or not res.response or not res.response.projects:
+        return []
+    return sorted(p.name for p in res.response.projects)
+
+
+def has_summary_task(project_name: str, task_name: str, tag: str) -> bool:
+    """Check if the project already holds a completed, non-archived summary task."""
+    tasks = Task.get_tasks(
+        project_name=project_name,
+        task_name=f"^{re.escape(task_name)}$",
+        tags=[tag],
+        task_filter={"status": ["completed"], "system_tags": ["-archived"]},
+    )
+    return any(t.get_project_name() == project_name for t in tasks)
 
 
 class DataGetter:
@@ -130,6 +157,16 @@ class DataGetter:
             if same_n_iterations and result.last_iteration is not None:
                 valid_iterations.append(result.last_iteration)
 
+        if self.max_samples is not None and valid_iterations:
+            n_points = max(valid_iterations) + 1  # iterations are counted from 0
+            if self.max_samples < n_points:
+                self.log.warning(
+                    f"`max_samples` ({self.max_samples}) is lower than the number of "
+                    f"reported iterations ({n_points}), so ClearML server downsamples the "
+                    "scalars (the last iterations may be missing). "
+                    f"Use `--max-samples {n_points}` to get all of the data points."
+                )
+
         if same_n_iterations and valid_iterations:
             self.min_n_iterations = min(valid_iterations)
 
@@ -214,7 +251,13 @@ class DataGetter:
     def _task_data_getter(self, t: Task) -> dict:
         if self.max_samples is None:
             return t.get_all_reported_scalars()
-        return t.get_reported_scalars(max_samples=self.max_samples)
+        data = t.get_reported_scalars(max_samples=self.max_samples)
+        if not data:
+            self.log.warning(
+                f"Task {t.task_id} returned no scalars for `max_samples={self.max_samples}` "
+                "(too high values make ClearML server return nothing)."
+            )
+        return data
 
     def _remove_colon_prefixed_scalars(self, data: dict) -> dict:
         for k in list(data.keys()):
@@ -230,6 +273,7 @@ class DataGetter:
                 "No scalar metrics are shared by all selected tasks. Returning empty list."
             )
             return []
+        metric_paths = self._drop_duplicated_series(metric_paths)
         if self.merge_summaries_metrics:
             self.log.info(
                 f"Found {len(metric_paths)} metric path(s). Merging already processed metrics via title suffixes."
@@ -283,6 +327,21 @@ class DataGetter:
             if not (skip_time_series and "time" in title.lower())
             for series in series_dict
         }
+
+    def _drop_duplicated_series(self, metric_paths: list[str]) -> list[str]:
+        """
+        Drop `Title/name/y` when `Title/name/series/y` exists - both hold the same data
+        (e.g. reported directly and via TensorBoard binding).
+        """
+        paths = set(metric_paths)
+        duplicated = {
+            f"{p.removesuffix('/series/y')}/y" for p in paths if p.endswith("/series/y")
+        } & paths
+        if duplicated:
+            self.log.info(
+                f"Dropping {len(duplicated)} duplicated metric path(s) (kept the `/series` ones)."
+            )
+        return sorted(paths - duplicated)
 
     # TODO(issue#91) Refactor function creep
     def _filter_tasks_and_get_merged_metrics_series(
