@@ -46,7 +46,7 @@ repos:
         args: [--write-changes]
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+    rev: v0.17.4
     hooks:
     -   id: ruff-check
         args:
