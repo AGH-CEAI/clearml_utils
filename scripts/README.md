@@ -58,6 +58,19 @@ Clone task multiple times into a selected queue.
 ./clearml_enqueue_tasks.py --base-task-id=BASE-TASK-ID --tasks-num=20 --queue-name=geonosis
 ```
 
+By default each task gets its own seed: task `i` gets `--seed-start` + `i` (default 0..N-1, also the `_<n>` in its name), written into the
+`seed = ...` line of the base task's configuration section `--seed-section` (default `rl`, key `--seed-key`
+`seed`), and into `Args/seed` if the base task has it. The ClearML agent runs a task with its stored
+configuration and ignores the `Args` overrides of it, so the seed has to be set in the configuration. Each
+clone is read back to check it. `--no-seeds` keeps the base task's seed in all the tasks.
+
+```bash
+# seeds 10..14
+./clearml_enqueue_tasks.py --base-task-id=BASE-TASK-ID --tasks-num=5 --queue-name=geonosis --seed-start=10
+# all with the base task's seed
+./clearml_enqueue_tasks.py --base-task-id=BASE-TASK-ID --tasks-num=5 --queue-name=geonosis --no-seeds
+```
+
 ---
 
 ### [`clearml_enqueue_eval_tasks.py`](./clearml_enqueue_eval_tasks.py)
@@ -90,6 +103,33 @@ Summarize ClearML experiments.
 uv run --script ./clearml_summarizer.py --cleanup-previous-tags --project-name PROJECT/PATH --tags bc
 uv run --script ./clearml_summarizer.py -h
 ```
+
+> [!TIP]
+> Use `--max-samples` equal to the number of reported iterations (e.g. `5000` for iterations `0..4999`), otherwise the ClearML server downsamples the data.
+
+### Running from the ClearML WebUI
+The summarizer can be executed by a clearml-agent (e.g. the `clearml-services` one, listening on the `services` queue):
+1. Create (once) a draft template task in the `CLEARML_UTILS/summarize` project. The given args become the template defaults:
+   ```bash
+   ./clearml_summarizer.py --create-template --cleanup-previous-tags --project-name REACHER_BASELINE_1 --subprojects --skip-summarized --tags run --max-samples 5000
+   ```
+   The same works for `clearml_exp_plotter.py`, which creates its template in the `CLEARML_UTILS/exp_plot` project:
+   ```bash
+   ./clearml_exp_plotter.py --create-template --cleanup-previous-tags --project-name REACHER_BASELINE_1 --max-samples 5000
+   ```
+2. In the WebUI: clone the template, edit `CONFIGURATION -> HYPERPARAMETERS -> Args` and enqueue it to the `services` queue.
+
+> [!NOTE]
+> The agent clones the repository at the template's commit (HTTPS URL) and applies its stored uncommitted changes (`git diff`).
+> New, untracked files are not part of the diff: commit them, or at least `git add -N <file>`, before creating the template.
+
+#### Container image
+By default the template uses the `python:3.14-slim` image, and the agent installs the packages on each run.
+To skip the installation, build the [`Dockerfile`](./Dockerfile) on the machine running the agent:
+```bash
+docker build -t clearml-utils:latest scripts/
+```
+and set `clearml-utils:latest` as the image (`--template-docker clearml-utils:latest`, or in the WebUI: `EXECUTION -> CONTAINER`).
 
 ---
 
