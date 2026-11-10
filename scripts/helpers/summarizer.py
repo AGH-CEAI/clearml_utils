@@ -50,6 +50,9 @@ class StatisticsData:
     std: list[float]
     minimum: list[float]
     maximum: list[float]
+    # Own X axis of the series (e.g. merged summaries of different lengths),
+    # if `None` the `StatisticsSeries.x_axis` is used.
+    x_axis: list[float] | None = None
 
 
 @dataclass(slots=True)
@@ -57,6 +60,9 @@ class StatisticsSeries:
     name: str
     series: list[StatisticsData]
     x_axis: list[float]
+
+    def series_x_axis(self, series: StatisticsData) -> list[float]:
+        return self.x_axis if series.x_axis is None else series.x_axis
 
 
 FIELD_MAP = {"mean": "mean", "std": "std", "min": "minimum", "max": "maximum"}
@@ -160,9 +166,16 @@ class Summarizer:
         ) -> tuple[str, StatisticsSeries]:
             n_tasks = len(self.tasks)
             first_stat = next(iter(stats))
-            first_task_data = next(iter(self.tasks.values()))
-            x_axis = self._get_x_axis(
-                top_key, first_stat, len(first_task_data[top_key][first_stat]["y"])
+            longest_task_data = max(
+                self.tasks.values(), key=lambda t: len(t[top_key][first_stat]["y"])
+            )
+            x_axis = list(
+                longest_task_data[top_key][first_stat].get("x")
+                or self._get_x_axis(
+                    top_key,
+                    first_stat,
+                    len(longest_task_data[top_key][first_stat]["y"]),
+                )
             )
             result = StatisticsSeries(
                 name=top_key, series=[None] * n_tasks, x_axis=x_axis
@@ -173,6 +186,12 @@ class Summarizer:
                 m_stats = {
                     FIELD_MAP[stat]: t_data[top_key][stat]["y"] for stat in stats
                 }
+                # Summaries can differ in length (e.g. downsampled or incomplete ones)
+                length = min(len(y) for y in m_stats.values())
+                task_x_axis = t_data[top_key][first_stat].get("x") or range(length)
+                length = min(length, len(task_x_axis))
+                m_stats = {k: list(v[:length]) for k, v in m_stats.items()}
+                task_x_axis = list(task_x_axis[:length])
                 task = tasks_cache[t_id]
                 series_name: str = task.name
 
@@ -187,8 +206,17 @@ class Summarizer:
                     series_name = f"{series_name}_{t_id[:6]}"
 
                 unique_series_names.add(series_name)
+                if task_x_axis != x_axis:
+                    self.log.warning(
+                        f"[METRIC] {top_key} | Series '{series_name}' (task {t_id}) has "
+                        f"{length} points (last iteration: {task_x_axis[-1] if length else None}), "
+                        f"while the longest one has {len(x_axis)}. Consider re-summarizing it."
+                    )
                 result.series[idx] = StatisticsData(
-                    series_name=series_name, data_num=None, **m_stats
+                    series_name=series_name,
+                    data_num=None,
+                    x_axis=task_x_axis,
+                    **m_stats,
                 )
 
             return top_key, result
@@ -281,16 +309,19 @@ class Summarizer:
         add_tag_to_tasks: bool = True,
         tag_for_tasks: str = DEFAULT_SUMMARY_TAG_NAME,
         cleanup_previous_tags: bool = True,
-    ) -> None:
-        summary_task = Task.init(
+    ) -> bool:
+        """Returns `False` if the summarization failed."""
+        # Not `Task.init`: it can be called once per process (and under clearml-agent it
+        # returns the agent's task), while the summary is a separate task in each project.
+        summary_task = Task.create(
             project_name=self.project_name,
             task_name=self.summary_task_name,
-            task_type=self.summary_task_type,
-            tags=self.summary_task_tags,
-            reuse_last_task_id=False,
-            auto_resource_monitoring=False,
-            auto_connect_streams=False,
+            task_type=self.summary_task_type.value,
+            add_task_init_call=False,
+            detect_repository=False,
         )
+        summary_task.add_tags(self.summary_task_tags)
+        summary_task.mark_started(force=True)
         self.log.info(
             f"Summary task '{self.project_name}/{self.summary_task_name}' "
             f"(id={summary_task.task_id}) created."
@@ -319,14 +350,19 @@ class Summarizer:
             caught_exception = True
         finally:
             self.log.info("Closing the summary task.")
-            summary_task.close()
+            summary_task.flush(wait_for_uploads=True)
+            if caught_exception:
+                summary_task.mark_failed(status_reason="Summarization failed")
+            else:
+                summary_task.mark_completed()
 
         self.log.info(
             f"Finished summarization of {len(self.tasks)} tasks with {len(self.metric_paths)} metrics."
         )
 
         if caught_exception:
-            self.log.exception("There was an exception. Check the previous logs.")
+            self.log.error("There was an exception. Check the previous logs.")
+        return not caught_exception
 
     def _cleanup_previous_tags(self, tag: str) -> None:
         self.log.info("Removing previous summary tags from task(s).")
@@ -382,8 +418,8 @@ class Summarizer:
                 )
             )
 
-        for step, x in enumerate(metric.x_axis):
-            for series in metric.series:
+        for series in metric.series:
+            for step, x in enumerate(metric.series_x_axis(series)):
                 series_name = series.series_name
                 mean = series.mean
                 std = series.std
@@ -503,7 +539,6 @@ class Summarizer:
             band_alpha=self.plot_alpha_fill,
         )
 
-        x = np.asarray(metric.x_axis)
         metric_name = metric.name
 
         # One figure per summary type, all series added before reporting
@@ -513,6 +548,7 @@ class Summarizer:
 
         for series, (line_color, fill_color) in zip(metric.series, series_colors):
             series_name = series.series_name
+            x = np.asarray(metric.series_x_axis(series))
             mean = np.asarray(series.mean)
             std = np.asarray(series.std)
             minimum = np.asarray(series.minimum)
@@ -618,7 +654,6 @@ class Summarizer:
         t_log: Logger,
         metric: StatisticsSeries,
     ) -> None:
-        x = np.asarray(metric.x_axis)
         metric_name = metric.name
 
         # Create one figure per summary type upfront
@@ -640,6 +675,7 @@ class Summarizer:
 
         for series in metric.series:
             series_name = series.series_name
+            x = np.asarray(metric.series_x_axis(series))
             mean = np.asarray(series.mean)
             std = np.asarray(series.std)
             minimum = np.asarray(series.minimum)

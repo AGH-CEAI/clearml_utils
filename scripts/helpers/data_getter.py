@@ -366,8 +366,11 @@ class DataGetter:
                 if m_type_title_merged not in self.tasks[t_id]:
                     self.tasks[t_id][m_type_title_merged] = {}
 
+                source = self.tasks[t_id][m_type_title][series]
                 self.tasks[t_id][m_type_title_merged][new_series] = {
-                    y: self.tasks[t_id][m_type_title][series][y],
+                    y: source[y],
+                    # keep the iterations, summaries can be downsampled or incomplete
+                    **({"x": source["x"]} if "x" in source else {}),
                 }
 
                 results.add(f"{m_type_title_merged}/{new_series}/{y}")

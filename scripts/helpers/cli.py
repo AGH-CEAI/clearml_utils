@@ -30,31 +30,41 @@ where `SUMMARY` is the result of the `clearml_summarizer.py` run in the `YOUR_PR
 """
 
 import argparse
+import re
 
 from helpers.data_getter import SummaryType
 
 
-def summary_type_parser(summary_type_strs: list[str]) -> list[SummaryType]:
-    """Convert CLI args to SummaryType enum list"""
+def summary_type_parser(summary_type_strs: str | list[str]) -> list[SummaryType]:
+    """
+    Convert CLI args to SummaryType enum list. Accepts names or values, separated by spaces
+    or commas, also as a stringified list (as stored in the ClearML task `Args`).
+    """
+    if isinstance(summary_type_strs, str):
+        summary_type_strs = [summary_type_strs]
+    text = " ".join(str(s) for s in summary_type_strs)
+    # Prefer quoted values, e.g. "['mean', 'mean-std']" or "[<SummaryType.MEAN: 'mean'>]"
+    tokens = re.findall(r"'([\w-]+)'", text) or re.findall(r"[\w-]+", text)
+
     types = []
-    for s in summary_type_strs:
-        # Handle comma-separated values in single arg
-        for arg in s.split(","):
-            arg = arg.strip().upper()
+    for token in tokens:
+        try:
+            types.append(SummaryType(token.lower()))
+        except ValueError:
             try:
-                types.append(SummaryType[arg])
+                types.append(SummaryType[token.upper()])
             except KeyError:
                 raise ValueError(
-                    f"Invalid summary type: '{arg}'. "
-                    f"Valid options: {', '.join(t.name for t in SummaryType)}"
+                    f"Invalid summary type: '{token}'. "
+                    f"Valid options: {', '.join(t.name.lower() for t in SummaryType)}"
                 )
-    return types
+    return list(dict.fromkeys(types))
 
 
 def build_parser(
     tags_required: bool,
     default_summary_task_name: str,
-    default_summary_types: list[str],
+    default_summary_types: list[SummaryType],
 ) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -64,8 +74,11 @@ def build_parser(
     p.add_argument(
         "--tags",
         nargs="+",
-        help="One or more tags to select tasks (ClearML ANDs multiple tags).",
-        required=tags_required,
+        help=(
+            "One or more tags to select tasks (ClearML ANDs multiple tags)."
+            + (" Required." if tags_required else "")
+        ),
+        # Not `required=True`: it would fail before ClearML (agent) applies the task `Args`
         default=[],
     )
     # p.add_argument("--exp-projects-names", help="One or more projects names (i.e. different experiments) which are already summarized.", required=True)
@@ -103,6 +116,13 @@ def build_parser(
         help=("Backend to use for plotting (default: `plotly`)."),
     )
     p.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        dest="n_jobs",
+        help="Number of parallel threads for ClearML queries (default: -1, all CPU cores).",
+    )
+    p.add_argument(
         "--cleanup-previous-tags",
         action="store_true",
         default=False,
@@ -113,13 +133,13 @@ def build_parser(
     p.add_argument(
         "--summary-types",
         nargs="+",
-        type=summary_type_parser,
-        default=default_summary_types,
+        # Parsed with `summary_type_parser()` after `parse_args()`
+        default=[t.value for t in default_summary_types],
         metavar="TYPE",
         help=(
             f"Summary statistics to compute. Valid: {valid_types}. "
             "Supports comma-separated (e.g., `--summary-types mean,mean_std`) "
-            "or multiple args (e.g., `--summary-types mean --summary-types mean_std`). "
+            "or multiple args (e.g., `--summary-types mean mean_std`). "
             f"Defaults to [`MEAN`] for a exp-summary and [`MEAN_STD`, `MEAN_MINMAX`] for a summary`."
         ),
     )
