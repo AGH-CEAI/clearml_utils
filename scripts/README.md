@@ -58,7 +58,7 @@ Clone task multiple times into a selected queue.
 ./clearml_enqueue_tasks.py --base-task-id=BASE-TASK-ID --tasks-num=20 --queue-name=geonosis
 ```
 
-By default each task gets its own seed: task `i` gets `--seed-start` + `i` (default 0..N-1), written into the
+By default each task gets its own seed: task `i` gets `--seed-start` + `i` (default 0..N-1, also the `_<n>` in its name), written into the
 `seed = ...` line of the base task's configuration section `--seed-section` (default `rl`, key `--seed-key`
 `seed`), and into `Args/seed` if the base task has it. The ClearML agent runs a task with its stored
 configuration and ignores the `Args` overrides of it, so the seed has to be set in the configuration. Each

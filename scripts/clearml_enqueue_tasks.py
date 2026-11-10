@@ -161,7 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the base task's seed in all the tasks (default: each task gets its own).",
     )
     p.add_argument(
-        "--seed-start", type=int, default=0, help="The seed of the first task."
+        "--seed-start",
+        type=int,
+        default=0,
+        help="The seed of the first task, also the number in its name (`<name>_<seed>`).",
     )
     p.add_argument(
         "--seed-section",
@@ -223,7 +226,8 @@ def enqueue_tasks(
     has_seed_arg = SEED_ARG in base_task.get_parameters()
 
     for cnt in tqdm(range(tasks_num), desc="Scheduling", unit="task"):
-        task_name = f"{base_name}_{cnt}"
+        # numbered from the first seed, so the runs added later with `--seed-start` get new names
+        task_name = f"{base_name}_{seed_start + cnt}"
         task_parameters = dict(parameters)
         configuration = None
         if seed_config is not None:
